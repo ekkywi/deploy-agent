@@ -4,11 +4,10 @@ import fs from 'fs';
 import path from 'path';
 
 const execAsync = util.promisify(exec);
-const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL;
-const AUTH_TOKEN = process.env.AGENT_AUTH_TOKEN;
 
 export async function executeDeployment(payload: any) {
     const { deploymentId, repoUrl, stackType, environmentName } = payload;
+    
     const workDir = path.join(process.cwd(), 'workspaces', deploymentId);
     const containerName = `deploy-${deploymentId}`;
     const imageName = `image-${deploymentId}`;
@@ -20,41 +19,54 @@ export async function executeDeployment(payload: any) {
             fs.mkdirSync(workDir, { recursive: true });
         }
 
-        console.log(`[1/4] Cloning repository: ${repoUrl}`);
+        console.log(`[1/5] Cloning repository: ${repoUrl}`);
         await execAsync(`git clone ${repoUrl} .`, { cwd: workDir });
+
+        console.log(`[2/5] Injecting Environment Variables...`);
+        if (payload.envVars && payload.envVars.length > 0) {
+            const envContent = payload.envVars.map((e: any) => `${e.key}=${e.value}`).join('\n');
+            fs.writeFileSync(path.join(workDir, '.env'), envContent);
+            console.log(`      -> Injected ${payload.envVars.length} variables into .env file.`);
+        } else {
+            console.log(`      -> No environment variables provided.`);
+        }
 
         const dockerfilePath = path.join(workDir, 'Dockerfile');
         if (!fs.existsSync(dockerfilePath)) {
-            console.log(`[2/4] No Dockerfile found. Generating default for ${stackType}...`);
+            console.log(`[3/5] No Dockerfile found. Generating default for ${stackType}...`);
             if (stackType === 'NEXTJS') {
                 fs.writeFileSync(dockerfilePath, `
-FROM node:18-alpine
+FROM node:22-alpine
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
 COPY . .
+RUN npx prisma generate
 RUN npm run build
 EXPOSE 3000
 CMD ["npm", "start"]
                 `.trim());
             } else {
-                throw new Error(`Auto-generation for stack ${stackType} is not supported yet. Please provide a Dockerfile in your repo.`);
+                throw new Error(`Auto-generation for stack ${stackType} is not supported yet.`);
             }
-        } else {
-            console.log(`[2/4] Custom Dockerfile detected.`);
         }
 
-        console.log(`[3/4] Building Docker Image (${imageName})... this may take a while.`);
-        await execAsync(`docker build -t ${imageName} .`, { cwd: workDir });
+        console.log(`[4/5] Building Docker Image (${imageName})...`);
+        await execAsync(`docker build --network=host -t ${imageName} .`, { cwd: workDir });
 
-        console.log(`[4/4] Starting Container...`);
+        console.log(`[5/5] Starting Container...`);
+        
+        try {
+            await execAsync(`docker rm -f ${containerName}`);
+        } catch (e) {
+        }
+
         await execAsync(`docker run -d -P --name ${containerName} ${imageName}`);
 
         const { stdout: portOutput } = await execAsync(`docker port ${containerName} 3000/tcp`);
         const assignedPort = parseInt(portOutput.split(':')[1].trim(), 10);
         
         console.log(`[✅ SUCCESS] Container is running on Port: ${assignedPort}`);
-
         await reportToControlPlane(deploymentId, 'SUCCESS', assignedPort, 'Container deployed successfully.');
 
     } catch (error: any) {
@@ -69,10 +81,13 @@ CMD ["npm", "start"]
 }
 
 async function reportToControlPlane(deploymentId: string, status: string, port: number | null, message: string) {
+    const CONTROL_PLANE_URL = process.env.CONTROL_PLANE_URL;
+    const AUTH_TOKEN = process.env.AGENT_AUTH_TOKEN;
+
     if (!CONTROL_PLANE_URL) return;
 
     try {
-        await fetch(`${CONTROL_PLANE_URL}/api/webhooks/agent/deploy-status`, {
+        const response = await fetch(`${CONTROL_PLANE_URL}/api/webhooks/agent/deploy-status`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -80,8 +95,14 @@ async function reportToControlPlane(deploymentId: string, status: string, port: 
             },
             body: JSON.stringify({ deploymentId, status, port, message })
         });
-        console.log(`[📡 CALLBACK] Status reported to Control Plane.`);
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`HTTP ${response.status} - ${errorText}`);
+        }
+
+        console.log(`[📡 CALLBACK] Status '${status}' successfully reported to Control Plane.`);
     } catch (err: any) {
-        console.error(`[⚠️ CALLBACK ERROR] Failed to reach Control Plane: ${err.message}`);
+        console.error(`[⚠️ CALLBACK ERROR] Failed to report to Control Plane: ${err.message}`);
     }
 }
