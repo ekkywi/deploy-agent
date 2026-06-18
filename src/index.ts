@@ -2,6 +2,9 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { executeDeployment } from './executor';
+import { exec } from 'child_process';
+import util from 'util';
+const execAsync = util.promisify(exec);
 
 dotenv.config();
 
@@ -69,4 +72,25 @@ app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`📡 Listening on http://0.0.0.0:${PORT}`);
     console.log(`🛡️  Security token validation: ENABLED`);
     console.log(`======================================\n`);
+});
+
+app.post('/api/container/toggle', async (req, res) => {
+    const { environmentId, action } = req.body;
+    
+    if (!environmentId || !['start', 'stop'].includes(action)) {
+        return res.status(400).json({ error: 'Invalid parameters' });
+    }
+
+    const containerName = `env-${environmentId}`;
+
+    try {
+        console.log(`\n[🛑 LIFECYCLE] Executing '${action}' on container ${containerName}`);
+        await execAsync(`docker ${action} ${containerName}`);
+        
+        console.log(`[✅ SUCCESS] Container ${containerName} is now ${action}ed.`);
+        return res.status(200).json({ message: `Container successfully ${action}ed.` });
+    } catch (error: any) {
+        console.error(`[❌ FAILED] Failed to ${action} container:`, error.message);
+        return res.status(500).json({ error: error.message });
+    }
 });
