@@ -6,21 +6,21 @@ import path from 'path';
 const execAsync = util.promisify(exec);
 
 export async function executeDeployment(payload: any) {
-    const { deploymentId, repoUrl, stackType, environmentName } = payload;
-    
+    const { deploymentId, environmentId, repoUrl, stackType, environmentName, branch, targetPort } = payload;
     const workDir = path.join(process.cwd(), 'workspaces', deploymentId);
-    const containerName = `deploy-${deploymentId}`;
+    const containerName = `env-${environmentId}`; 
     const imageName = `image-${deploymentId}`;
 
     try {
         console.log(`\n[⚙️ EXECUTION] Starting job for ${deploymentId}`);
+        console.log(`[🎯 TARGET] Environment: ${environmentName} | Branch: ${branch} | Port: ${targetPort}`);
         
         if (!fs.existsSync(workDir)) {
             fs.mkdirSync(workDir, { recursive: true });
         }
 
-        console.log(`[1/5] Cloning repository: ${repoUrl}`);
-        await execAsync(`git clone ${repoUrl} .`, { cwd: workDir });
+        console.log(`[1/5] Cloning repository: ${repoUrl} (Branch: ${branch})`);
+        await execAsync(`git clone -b ${branch} --single-branch ${repoUrl} .`, { cwd: workDir });
 
         console.log(`[2/5] Injecting Environment Variables...`);
         if (payload.envVars && payload.envVars.length > 0) {
@@ -57,25 +57,31 @@ CMD ["npm", "start"]
         console.log(`[5/5] Starting Container...`);
         
         try {
+            console.log(`      -> Terminating old container instance if exists...`);
             await execAsync(`docker rm -f ${containerName}`);
         } catch (e) {
         }
 
-        await execAsync(`docker run -d -P --name ${containerName} ${imageName}`);
-
-        const { stdout: portOutput } = await execAsync(`docker port ${containerName} 3000/tcp`);
-        const assignedPort = parseInt(portOutput.split(':')[1].trim(), 10);
+        console.log(`      -> Booting new container on port ${targetPort}...`);
+        await execAsync(`docker run -d -p ${targetPort}:3000 --name ${containerName} ${imageName}`);
         
-        console.log(`[✅ SUCCESS] Container is running on Port: ${assignedPort}`);
-        await reportToControlPlane(deploymentId, 'SUCCESS', assignedPort, 'Container deployed successfully.');
+        console.log(`[✅ SUCCESS] Container is running on Port: ${targetPort}`);
+        await reportToControlPlane(deploymentId, 'SUCCESS', targetPort, 'Container deployed successfully.');
 
     } catch (error: any) {
         console.error(`\n[❌ FAILED] Deployment error:`, error.message);
         await reportToControlPlane(deploymentId, 'FAILED', null, error.message);
     } finally {
-        console.log(`[🧹 CLEANUP] Removing temporary workspace...`);
+        console.log(`[🧹 CLEANUP] Removing temporary workspace and dangling images...`);
+        
         if (fs.existsSync(workDir)) {
             fs.rmSync(workDir, { recursive: true, force: true });
+        }
+        
+        try {
+            await execAsync(`docker image prune -f`);
+        } catch (e) {
+            console.error(`[⚠️ CLEANUP WARNING] Failed to prune unused images.`);
         }
     }
 }
