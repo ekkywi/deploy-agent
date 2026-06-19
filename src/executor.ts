@@ -9,7 +9,7 @@ export async function executeDeployment(payload: any) {
     const { deploymentId, environmentId, repoUrl, stackType, environmentName, branch, targetPort } = payload;
     const workDir = path.join(process.cwd(), 'workspaces', deploymentId);
     const containerName = `env-${environmentId}`; 
-    const imageName = `image-${deploymentId}`;
+    const imageName = `env-${environmentId}:latest`;
 
     try {
         console.log(`\n[⚙️ EXECUTION] Starting job for ${deploymentId}`);

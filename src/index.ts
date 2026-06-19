@@ -94,3 +94,33 @@ app.post('/api/container/toggle', async (req, res) => {
         return res.status(500).json({ error: error.message });
     }
 });
+
+app.delete('/api/environment/:id', async (req, res) => {
+    const environmentId = req.params.id;
+    const containerName = `env-${environmentId}`;
+    const imageName = `env-${environmentId}:latest`;
+
+    try {
+        console.log(`\n[🗑️ TEARDOWN] Initiating destruction for Environment: ${environmentId}`);
+
+        try {
+            await execAsync(`docker rm -f ${containerName}`);
+            console.log(`      -> Container ${containerName} destroyed.`);
+        } catch (e) {
+            console.log(`      -> Container ${containerName} not found. Skipping.`);
+        }
+
+        try {
+            await execAsync(`docker rmi -f ${imageName}`);
+            console.log(`      -> Image ${imageName} destroyed.`);
+        } catch (e) {
+            console.log(`      -> Image ${imageName} not found. Skipping.`);
+        }
+
+        console.log(`[✅ SUCCESS] Infrastructure for ${environmentId} completely wiped.`);
+        return res.status(200).json({ message: 'Infrastructure cleanly destroyed.' });
+    } catch (error: any) {
+        console.error(`[❌ FAILED] Teardown error:`, error.message);
+        return res.status(500).json({ error: 'Internal agent error during teardown.' });
+    }
+});
