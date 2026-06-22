@@ -2,8 +2,11 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { executeDeployment } from './executor';
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import util from 'util';
+import fs from 'fs';
+import path from 'path';
+
 const execAsync = util.promisify(exec);
 
 dotenv.config();
@@ -66,14 +69,6 @@ app.post('/api/deploy', requireAuth, (req: Request, res: Response) => {
     executeDeployment(payload);
 });
 
-app.listen(Number(PORT), '0.0.0.0', () => {
-    console.log(`\n======================================`);
-    console.log(`🚀 Docker Agent Runner is active`);
-    console.log(`📡 Listening on http://0.0.0.0:${PORT}`);
-    console.log(`🛡️  Security token validation: ENABLED`);
-    console.log(`======================================\n`);
-});
-
 app.post('/api/container/toggle', async (req, res) => {
     const { environmentId, action } = req.body;
     
@@ -123,4 +118,52 @@ app.delete('/api/environment/:id', async (req, res) => {
         console.error(`[❌ FAILED] Teardown error:`, error.message);
         return res.status(500).json({ error: 'Internal agent error during teardown.' });
     }
+});
+
+app.get('/api/deploy/:deploymentId/logs', requireAuth, (req: Request, res: Response) => {
+    const { deploymentId } = req.params;
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const logsDir = path.join(process.cwd(), 'logs');
+    const logFilePath = path.join(logsDir, `${deploymentId}.log`);
+
+    if (!fs.existsSync(logsDir)) {
+        fs.mkdirSync(logsDir, { recursive: true });
+    }
+    if (!fs.existsSync(logFilePath)) {
+        fs.writeFileSync(logFilePath, '[SYSTEM] Initializing deployment sequence...\n');
+    }
+
+    const tailProcess = spawn('tail', ['-n', '100', '-f', logFilePath]);
+
+    tailProcess.stdout.on('data', (data) => {
+        const lines = data.toString().split('\n');
+        for (const line of lines) {
+            if (line) {
+                res.write(`data: ${line}\n\n`);
+            }
+        }
+    });
+
+    tailProcess.stderr.on('data', (data) => {
+        res.write(`data: [SYSTEM ERROR] ${data.toString()}\n\n`);
+    });
+
+    req.on('close', () => {
+        console.log(`[STREAM] Connection closed for deployment ${deploymentId}.`);
+        tailProcess.kill();
+        res.end();
+    });
+});
+
+app.listen(Number(PORT), '0.0.0.0', () => {
+    console.log(`\n======================================`);
+    console.log(`🚀 Docker Agent Runner is active`);
+    console.log(`📡 Listening on http://0.0.0.0:${PORT}`);
+    console.log(`🛡️  Security token validation: ENABLED`);
+    console.log(`======================================\n`);
 });
