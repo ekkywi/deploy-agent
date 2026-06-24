@@ -1,39 +1,65 @@
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import util from 'util';
 import fs from 'fs';
 import path from 'path';
 
 const execAsync = util.promisify(exec);
 
+function runCommandRealtime(command: string, workDir: string, logFilePath: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const proc = spawn(command, { cwd: workDir, shell: true });
+
+        proc.stdout.on('data', (data: Buffer) => {
+            fs.appendFileSync(logFilePath, data.toString());
+        });
+
+        proc.stderr.on('data', (data: Buffer) => {
+            fs.appendFileSync(logFilePath, data.toString());
+        });
+
+        proc.on('close', (code) => {
+            if (code === 0) resolve();
+            else reject(new Error(`Command exited with code ${code}`));
+        });
+    });
+}
+
 export async function executeDeployment(payload: any) {
     const { deploymentId, environmentId, repoUrl, stackType, environmentName, branch, targetPort } = payload;
     const workDir = path.join(process.cwd(), 'workspaces', deploymentId);
+    const logsDir = path.join(process.cwd(), 'logs');
+    const logFilePath = path.join(logsDir, `${deploymentId}.log`);
     const containerName = `env-${environmentId}`; 
     const imageName = `env-${environmentId}:latest`;
 
+    if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+    if (!fs.existsSync(workDir)) fs.mkdirSync(workDir, { recursive: true });
+
+    const writeLog = (message: string) => {
+        console.log(message);
+        fs.appendFileSync(logFilePath, `${message}\n`);
+    };
+
     try {
-        console.log(`\n[⚙️ EXECUTION] Starting job for ${deploymentId}`);
-        console.log(`[🎯 TARGET] Environment: ${environmentName} | Branch: ${branch} | Port: ${targetPort}`);
-        
-        if (!fs.existsSync(workDir)) {
-            fs.mkdirSync(workDir, { recursive: true });
-        }
+        writeLog(`\n[⚙️ EXECUTION] Starting job for ${deploymentId}`);
+        writeLog(`[🎯 TARGET] Environment: ${environmentName} | Branch: ${branch} | Port: ${targetPort}`);
+        writeLog(`----------------------------------------------------------------------`);
 
-        console.log(`[1/5] Cloning repository: ${repoUrl} (Branch: ${branch})`);
-        await execAsync(`git clone -b ${branch} --single-branch ${repoUrl} .`, { cwd: workDir });
+        writeLog(`[1/5] Cloning repository: ${repoUrl} (Branch: ${branch})`);
+        await runCommandRealtime(`git clone -b ${branch} --single-branch ${repoUrl} .`, workDir, logFilePath);
 
-        console.log(`[2/5] Injecting Environment Variables...`);
+        writeLog(`\n[2/5] Injecting Environment Variables...`);
         if (payload.envVars && payload.envVars.length > 0) {
             const envContent = payload.envVars.map((e: any) => `${e.key}=${e.value}`).join('\n');
             fs.writeFileSync(path.join(workDir, '.env'), envContent);
-            console.log(`      -> Injected ${payload.envVars.length} variables into .env file.`);
+            writeLog(`      -> Injected ${payload.envVars.length} variables into .env file.`);
         } else {
-            console.log(`      -> No environment variables provided.`);
+            writeLog(`      -> No environment variables provided.`);
         }
 
         const dockerfilePath = path.join(workDir, 'Dockerfile');
         if (!fs.existsSync(dockerfilePath)) {
-            console.log(`[3/5] No Dockerfile found. Generating default for ${stackType}...`);
+            writeLog(`\n[3/5] No Dockerfile found. Generating default for ${stackType}...`);
             if (stackType === 'NEXTJS') {
                 fs.writeFileSync(dockerfilePath, `
 FROM node:22-alpine
@@ -46,33 +72,37 @@ RUN npm run build
 EXPOSE 3000
 CMD ["npm", "start"]
                 `.trim());
+                writeLog(`      -> Next.js default Dockerfile generated successfully.`);
             } else {
                 throw new Error(`Auto-generation for stack ${stackType} is not supported yet.`);
             }
+        } else {
+            writeLog(`\n[3/5] Existing Dockerfile detected. Using repository configuration.`);
         }
 
-        console.log(`[4/5] Building Docker Image (${imageName})...`);
-        await execAsync(`docker build --network=host -t ${imageName} .`, { cwd: workDir });
+        writeLog(`\n[4/5] Building Docker Image (${imageName})...`);
+        await runCommandRealtime(`docker build --network=host -t ${imageName} .`, workDir, logFilePath);
 
-        console.log(`[5/5] Starting Container...`);
-        
+        writeLog(`\n[5/5] Starting Container...`);
         try {
-            console.log(`      -> Terminating old container instance if exists...`);
-            await execAsync(`docker rm -f ${containerName}`);
+            writeLog(`      -> Terminating old container instance if exists...`);
+            await runCommandRealtime(`docker rm -f ${containerName}`, workDir, logFilePath);
         } catch (e) {
         }
 
-        console.log(`      -> Booting new container on port ${targetPort}...`);
-        await execAsync(`docker run -d -p ${targetPort}:3000 --name ${containerName} ${imageName}`);
+        writeLog(`      -> Booting new container on port ${targetPort}...`);
+        await runCommandRealtime(`docker run -d -p ${targetPort}:3000 --name ${containerName} ${imageName}`, workDir, logFilePath);
         
-        console.log(`[✅ SUCCESS] Container is running on Port: ${targetPort}`);
+        writeLog(`\n[✅ SUCCESS] Container is running on Port: ${targetPort}`);
+        writeLog(`----------------------------------------------------------------------`);
         await reportToControlPlane(deploymentId, 'SUCCESS', targetPort, 'Container deployed successfully.');
 
     } catch (error: any) {
-        console.error(`\n[❌ FAILED] Deployment error:`, error.message);
+        writeLog(`\n[❌ FAILED] Deployment error: ${error.message}`);
+        writeLog(`----------------------------------------------------------------------`);
         await reportToControlPlane(deploymentId, 'FAILED', null, error.message);
     } finally {
-        console.log(`[🧹 CLEANUP] Removing temporary workspace and dangling images...`);
+        writeLog(`\n[🧹 CLEANUP] Removing temporary workspace and dangling images...`);
         
         if (fs.existsSync(workDir)) {
             fs.rmSync(workDir, { recursive: true, force: true });
@@ -80,8 +110,9 @@ CMD ["npm", "start"]
         
         try {
             await execAsync(`docker image prune -f`);
+            writeLog(`[🧹 CLEANUP] Unused images pruned successfully.`);
         } catch (e) {
-            console.error(`[⚠️ CLEANUP WARNING] Failed to prune unused images.`);
+            writeLog(`[⚠️ CLEANUP WARNING] Failed to prune unused images.`);
         }
     }
 }
