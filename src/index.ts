@@ -23,35 +23,29 @@ if (!AUTH_TOKEN) {
 app.use(cors());
 app.use(express.json());
 
-const requireAuth = (req: Request, res: Response, next: NextFunction) => {
+const requireAuth = (req: Request, res: Response, next: NextFunction): void => {
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader?.startsWith('Bearer ')) {
-        res.status(401).json(
-            { error: 'Unauthorized: Missing or invalid token format.'}
-        );
+        res.status(401).json({ error: 'Unauthorized: Missing or invalid token format.' });
         return;
     }
 
     const token = authHeader.split(' ')[1];
 
     if (token !== AUTH_TOKEN) {
-        res.status(403).json(
-            { error: 'Forbidden: Invalid agent token.' }
-        );
+        res.status(403).json({ error: 'Forbidden: Invalid agent token.' });
         return;
     }
 
     next();
 };
 
-app.post('/api/deploy', requireAuth, (req: Request, res: Response) => {
+app.post('/api/deploy', requireAuth, (req: Request, res: Response): void => {
     const payload = req.body;
 
     if (!payload.deploymentId || !payload.repoUrl || !payload.stackType) {
-        res.status(400).json(
-            { error: 'Bad Request: Missing required deployment payload fields.' }
-        );
+        res.status(400).json({ error: 'Bad Request: Missing required deployment payload fields.' });
         return;
     }
 
@@ -69,7 +63,7 @@ app.post('/api/deploy', requireAuth, (req: Request, res: Response) => {
     executeDeployment(payload);
 });
 
-app.post('/api/container/toggle', async (req, res) => {
+app.post('/api/container/toggle', requireAuth, async (req: Request, res: Response): Promise<any> => {
     const { environmentId, action } = req.body;
     
     if (!environmentId || !['start', 'stop'].includes(action)) {
@@ -90,7 +84,7 @@ app.post('/api/container/toggle', async (req, res) => {
     }
 });
 
-app.delete('/api/environment/:id', async (req, res) => {
+app.delete('/api/environment/:id', requireAuth, async (req: Request, res: Response): Promise<any> => {
     const environmentId = req.params.id;
     const containerName = `env-${environmentId}`;
     const imageName = `env-${environmentId}:latest`;
@@ -140,7 +134,7 @@ app.get('/api/deploy/:deploymentId/logs', requireAuth, (req: Request, res: Respo
 
     const tailProcess = spawn('tail', ['-n', '100', '-f', logFilePath]);
 
-    tailProcess.stdout.on('data', (data) => {
+    tailProcess.stdout.on('data', (data: Buffer) => {
         const lines = data.toString().split('\n');
         for (const line of lines) {
             if (line) {
@@ -149,7 +143,7 @@ app.get('/api/deploy/:deploymentId/logs', requireAuth, (req: Request, res: Respo
         }
     });
 
-    tailProcess.stderr.on('data', (data) => {
+    tailProcess.stderr.on('data', (data: Buffer) => {
         res.write(`data: [SYSTEM ERROR] ${data.toString()}\n\n`);
     });
 
@@ -159,6 +153,38 @@ app.get('/api/deploy/:deploymentId/logs', requireAuth, (req: Request, res: Respo
         res.end();
     });
 });
+
+const LOGS_DIR = path.join(process.cwd(), 'logs');
+const MAX_LOG_AGE_DAYS = 30;
+const MAX_LOG_AGE_MS = MAX_LOG_AGE_DAYS * 24 * 60 * 60 * 1000;
+
+setInterval(() => {
+    try {
+        if (!fs.existsSync(LOGS_DIR)) return;
+
+        const files = fs.readdirSync(LOGS_DIR);
+        const now = Date.now();
+        let deletedCount = 0;
+
+        files.forEach(file => {
+            if (!file.endsWith('.log')) return;
+            
+            const filePath = path.join(LOGS_DIR, file);
+            const stats = fs.statSync(filePath);
+
+            if (now - stats.mtimeMs > MAX_LOG_AGE_MS) {
+                fs.unlinkSync(filePath);
+                deletedCount++;
+            }
+        });
+
+        if (deletedCount > 0) {
+            console.log(`\n[🧹 SYSTEM] Log retention policy executed. Deleted ${deletedCount} old log files (>30 days).`);
+        }
+    } catch (error: any) {
+        console.error(`[⚠️ SYSTEM ERROR] Failed to run log garbage collector: ${error.message}`);
+    }
+}, 24 * 60 * 60 * 1000);
 
 app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`\n======================================`);
