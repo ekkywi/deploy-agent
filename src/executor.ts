@@ -2,6 +2,7 @@ import { exec, spawn } from 'child_process';
 import util from 'util';
 import fs from 'fs';
 import path from 'path';
+import { StackFactory } from './stacks/stack.factory';
 
 const execAsync = util.promisify(exec);
 
@@ -26,6 +27,7 @@ function runCommandRealtime(command: string, workDir: string, logFilePath: strin
 
 export async function executeDeployment(payload: any) {
     const { deploymentId, environmentId, repoUrl, stackType, environmentName, branch, targetPort } = payload;
+    
     const workDir = path.join(process.cwd(), 'workspaces', deploymentId);
     const logsDir = path.join(process.cwd(), 'logs');
     const logFilePath = path.join(logsDir, `${deploymentId}.log`);
@@ -58,26 +60,23 @@ export async function executeDeployment(payload: any) {
         }
 
         const dockerfilePath = path.join(workDir, 'Dockerfile');
+        
+        const stackStrategy = StackFactory.getStrategy(stackType);
+
         if (!fs.existsSync(dockerfilePath)) {
-            writeLog(`\n[3/5] No Dockerfile found. Generating default for ${stackType}...`);
-            if (stackType === 'NEXTJS') {
-                fs.writeFileSync(dockerfilePath, `
-FROM node:22-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm install
-COPY . .
-RUN npx prisma generate
-RUN npm run build
-EXPOSE 3000
-CMD ["npm", "start"]
-                `.trim());
-                writeLog(`      -> Next.js default Dockerfile generated successfully.`);
-            } else {
-                throw new Error(`Auto-generation for stack ${stackType} is not supported yet.`);
+            writeLog(`\n[3/5] No Dockerfile found. Resolving build strategy for ${stackType}...`);
+            
+            if (stackStrategy.preBuildHook) {
+                writeLog(`      -> Executing pre-build hooks for ${stackType}...`);
+                await stackStrategy.preBuildHook(workDir, logFilePath);
             }
+
+            const dockerfileContent = await stackStrategy.generateDockerfile(workDir);
+            fs.writeFileSync(dockerfilePath, dockerfileContent);
+            
+            writeLog(`      -> Auto-generated Dockerfile injected successfully.`);
         } else {
-            writeLog(`\n[3/5] Existing Dockerfile detected. Using repository configuration.`);
+            writeLog(`\n[3/5] Existing Dockerfile detected in repository. Bypassing auto-generation.`);
         }
 
         writeLog(`\n[4/5] Building Docker Image (${imageName})...`);
