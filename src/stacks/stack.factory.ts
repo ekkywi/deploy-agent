@@ -5,6 +5,7 @@ import { LaravelStackStrategy } from './laravel.strategy';
 export class StackFactory {
     private static strategies: Record<string, BaseStackStrategy> = {
         'NEXTJS': new NextJsStackStrategy(),
+        'NODEJS': new NextJsStackStrategy(),
         'LARAVEL': new LaravelStackStrategy(),
     };
 

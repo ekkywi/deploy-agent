@@ -6,6 +6,27 @@ import { StackFactory } from './stacks/stack.factory';
 
 const execAsync = util.promisify(exec);
 
+type DeploymentEnvVar = {
+    key: string;
+    value: string;
+};
+
+type DeploymentPayload = {
+    deploymentId: string;
+    environmentId: string;
+    repoUrl: string;
+    stackType: string;
+    nodeVersion?: string;
+    environmentName: string;
+    branch: string;
+    targetPort: number;
+    envVars?: DeploymentEnvVar[];
+};
+
+function getErrorMessage(error: unknown) {
+    return error instanceof Error ? error.message : 'Unknown error';
+}
+
 function runCommandRealtime(command: string, workDir: string, logFilePath: string): Promise<void> {
     return new Promise((resolve, reject) => {
         const proc = spawn(command, { cwd: workDir, shell: true });
@@ -25,8 +46,8 @@ function runCommandRealtime(command: string, workDir: string, logFilePath: strin
     });
 }
 
-export async function executeDeployment(payload: any) {
-    const { deploymentId, environmentId, repoUrl, stackType, environmentName, branch, targetPort } = payload;
+export async function executeDeployment(payload: DeploymentPayload) {
+    const { deploymentId, environmentId, repoUrl, stackType, nodeVersion, environmentName, branch, targetPort } = payload;
     
     const workDir = path.join(process.cwd(), 'workspaces', deploymentId);
     const logsDir = path.join(process.cwd(), 'logs');
@@ -52,7 +73,7 @@ export async function executeDeployment(payload: any) {
 
         writeLog(`\n[2/5] Injecting Environment Variables...`);
         if (payload.envVars && payload.envVars.length > 0) {
-            const envContent = payload.envVars.map((e: any) => `${e.key}=${e.value}`).join('\n');
+            const envContent = payload.envVars.map((envVar) => `${envVar.key}=${envVar.value}`).join('\n');
             fs.writeFileSync(path.join(workDir, '.env'), envContent);
             writeLog(`      -> Injected ${payload.envVars.length} variables into .env file.`);
         } else {
@@ -71,7 +92,7 @@ export async function executeDeployment(payload: any) {
                 await stackStrategy.preBuildHook(workDir, logFilePath);
             }
 
-            const dockerfileContent = await stackStrategy.generateDockerfile(workDir);
+            const dockerfileContent = await stackStrategy.generateDockerfile(workDir, nodeVersion);
             fs.writeFileSync(dockerfilePath, dockerfileContent);
             
             writeLog(`      -> Auto-generated Dockerfile injected successfully.`);
@@ -96,10 +117,11 @@ export async function executeDeployment(payload: any) {
         writeLog(`----------------------------------------------------------------------`);
         await reportToControlPlane(deploymentId, 'SUCCESS', targetPort, 'Container deployed successfully.');
 
-    } catch (error: any) {
-        writeLog(`\n[❌ FAILED] Deployment error: ${error.message}`);
+    } catch (error: unknown) {
+        const message = getErrorMessage(error);
+        writeLog(`\n[❌ FAILED] Deployment error: ${message}`);
         writeLog(`----------------------------------------------------------------------`);
-        await reportToControlPlane(deploymentId, 'FAILED', null, error.message);
+        await reportToControlPlane(deploymentId, 'FAILED', null, message);
     } finally {
         writeLog(`\n[🧹 CLEANUP] Removing temporary workspace and dangling images...`);
         
@@ -110,7 +132,7 @@ export async function executeDeployment(payload: any) {
         try {
             await execAsync(`docker image prune -f`);
             writeLog(`[🧹 CLEANUP] Unused images pruned successfully.`);
-        } catch (e) {
+        } catch {
             writeLog(`[⚠️ CLEANUP WARNING] Failed to prune unused images.`);
         }
     }
@@ -138,7 +160,7 @@ async function reportToControlPlane(deploymentId: string, status: string, port: 
         }
 
         console.log(`[📡 CALLBACK] Status '${status}' successfully reported to Control Plane.`);
-    } catch (err: any) {
-        console.error(`[⚠️ CALLBACK ERROR] Failed to report to Control Plane: ${err.message}`);
+    } catch (err: unknown) {
+        console.error(`[⚠️ CALLBACK ERROR] Failed to report to Control Plane: ${getErrorMessage(err)}`);
     }
 }
